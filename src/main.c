@@ -6,7 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #define MAX_LINES 20000
-#define MAX_LINE_LENGTH 10240
+#define MAX_LINE_LENGTH 1024
 #define COMMAND_BUFFER_SIZE 256
 #define SEARCH_BUFFER_SIZE 256
 char *filename = NULL;
@@ -46,7 +46,82 @@ struct SyntaxPattern syntax_patterns[] = {
     {"bool", 3},
     {"float", 3},
     {"double", 3},
-    {NULL, 0}
+    {"def", 4},
+    {"class", 4},
+    {"import", 4},
+    {"from", 4},
+    {"lambda", 4},
+    {"if", 4},
+    {"else", 4},
+    {"elif", 4},
+    {"try", 4},
+    {"except", 4},
+    {"finally", 4},
+    {"for", 4},
+    {"while", 4},
+    {"with", 4},
+    {"return", 4},
+    {"True", 4},
+    {"False", 4},
+    {"None", 4},
+    {"public", 5},
+    {"private", 5},
+    {"protected", 5},
+    {"class", 5},
+    {"interface", 5},
+    {"extends", 5},
+    {"implements", 5},
+    {"new", 5},
+    {"void", 5},
+    {"return", 5},
+    {"if", 5},
+    {"else", 5},
+    {"for", 5},
+    {"while", 5},
+    {"try", 5},
+    {"catch", 5},
+    {"finally", 5},
+    {"super", 5},
+    {"this", 5},
+    {"function", 6},
+    {"var", 6},
+    {"let", 6},
+    {"const", 6},
+    {"if", 6},
+    {"else", 6},
+    {"for", 6},
+    {"while", 6},
+    {"switch", 6},
+    {"case", 6},
+    {"break", 6},
+    {"continue", 6},
+    {"return", 6},
+    {"async", 6},
+    {"await", 6},
+    {"import", 6},
+    {"export", 6},
+    {"if", 7},
+    {"else", 7},
+    {"elif", 7},
+    {"for", 7},
+    {"while", 7},
+    {"do", 7},
+    {"done", 7},
+    {"return", 7},
+    {"function", 7},
+    {"test", 7},
+    {"echo", 7},
+    {"fi", 7},
+    {"NAME", 8},
+    {"SYNOPSIS", 8},
+    {"DESCRIPTION", 8},
+    {"OPTIONS", 8},
+    {"EXIT STATUS", 8},
+    {"RETURN VALUE", 8},
+    {"AUTHOR", 8},
+    {"tldr", 9},
+    {"example", 9},
+    {"usage", 9},
 };
 void handle_signal(int sig) {
     (void)sig;
@@ -149,34 +224,6 @@ void highlight_syntax(char *line) {
         }
     }
 }
-char* run_fzf() {
-    def_prog_mode();
-    endwin();
-    char buffer[MAX_LINE_LENGTH];
-    FILE *fp;
-    fp = popen("fzf", "w");
-    if (fp == NULL) {
-        perror("popen");
-        return NULL;
-    }
-    for (int i = 0; i < line_count; i++) {
-        fprintf(fp, "%s", lines[i]);
-    }
-    fclose(fp);
-    fp = popen("fzf", "r");
-    if (fp == NULL) {
-        perror("popen");
-        return NULL;
-    }
-    char* result = NULL;
-    if (fgets(buffer, sizeof(buffer), fp)) {
-        result = strdup(buffer);
-    }
-    fclose(fp);
-    reset_prog_mode();
-    refresh();
-    return result;
-}
 void search_forward(const char* term) {
     if (!term || strlen(term) == 0) return;
     for (int i = current_line + 1; i < line_count; i++) {
@@ -230,7 +277,7 @@ void draw_status_bar() {
     int percent = (int)((float)(current_line) / (line_count - 1) * 100);
     char status_message[MAX_LINE_LENGTH];
     snprintf(status_message, sizeof(status_message),
-             " %s | Line %d/%d (%d%%) | ':' cmd | '/' search | 'f' fzf | 'n' next | 'N' prev | 'q' quit",
+             " %s | Line %d/%d (%d%%) | ':' cmd | '/' search | 'n' next | 'N' prev | 'q' quit",
              filename, current_line + 1, line_count, percent);
     printw("%s", status_message);
     attroff(COLOR_PAIR(8) | A_BOLD);
@@ -247,17 +294,44 @@ void draw_status_bar() {
 void display_lines() {
     clear();
     int max_display_lines = LINES - 2;  
+    int x,y;
+    getmaxyx(stdscr, y, x);  
     for (int i = 0; i < max_display_lines && current_line + i < line_count; i++) {
         move(i, 0);
-        highlight_syntax(lines[current_line + i]);
+        char *line = lines[current_line + i];
+        int line_len = strlen(line);
+        int col = 0;
+        for (int j = 0; j < line_len; j++) {
+            if (col >= x - 1) {  
+                move(i++, 0);
+                col = 0;
+            }
+            highlight_syntax(line + j);
+            col++;
+        }
     }
     draw_status_bar();
     refresh();
 }
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
+if (isatty(STDIN_FILENO) == 0) {
+    FILE *file = stdin;
+    char buffer[MAX_LINE_LENGTH];
+    while (fgets(buffer, sizeof(buffer), file)) {
+        if (line_count < MAX_LINES) {
+            lines[line_count] = strdup(buffer);
+            line_count++;
+        }
+    }
+    filename = strdup("stdin");
+    } else if (argc < 2) {
         fprintf(stderr, "Usage: %s <file_name>\n", argv[0]);
         return 1;
+    } else {
+        if (load_file(argv[1]) == -1) {
+            endwin();
+            return 1;
+        }
     }
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -278,14 +352,15 @@ int main(int argc, char *argv[]) {
         init_pair(8, COLOR_BLACK, COLOR_WHITE);  
         init_pair(9, COLOR_GREEN, COLOR_BLACK);  
     }
-    if (load_file(argv[1]) == -1) {
-        endwin();
-        return 1;
-    }
     display_lines();
     int ch;
+    nodelay(stdscr, TRUE); 
     while (1) {
         ch = getch();
+        if (ch == ERR) { 
+            napms(100); 
+            continue;
+        }
         if (command_mode) {
             if (ch == '\n') {
                 process_command();
@@ -342,20 +417,6 @@ int main(int argc, char *argv[]) {
                 case 'N':
                     if (strlen(search_buffer) > 0) {
                         search_backward(search_buffer);
-                    }
-                    break;
-                case 'f':
-                    {
-                        char *selected_line = run_fzf();
-                        if (selected_line != NULL) {
-                            for (int i = 0; i < line_count; i++) {
-                                if (strcmp(lines[i], selected_line) == 0) {
-                                    current_line = i;
-                                    break;
-                                }
-                            }
-                            free(selected_line);
-                        }
                     }
                     break;
                 case KEY_DOWN:
