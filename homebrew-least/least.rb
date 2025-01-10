@@ -6,7 +6,7 @@ class Least < Formula
   sha256 "7bd0174d90a33de76cb4554506dc593a4a5844f3e6fec5b6cb881b158b22a66f"
   license "MIT"
 
-  depends_on "ncurses" # Example dependency, add more as needed
+  depends_on "ncurses"
 
   def install
     system "make"
