@@ -10,43 +10,38 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <wchar.h>
-
 #define MAX_LINES 100000
 #define MAX_LINE_LENGTH 2048
 #define COMMAND_BUFFER_SIZE 256
 #define SEARCH_BUFFER_SIZE 256
 #define TAB_SIZE 8
-
 typedef struct {
     char *content;
     int length;
     int allocated;
-    int *wrap_points;    // Array of indices where lines wrap
-    int wrap_count;      // Number of wrap points
-    int wrapped_lines;   // Total number of screen lines after wrapping
+    int *wrap_points;    
+    int wrap_count;      
+    int wrapped_lines;   
 } Line;
-
 typedef struct {
     Line *lines;
     int count;
     int capacity;
     char *filename;
-    int current_line;    // Logical line number
-    int screen_line;     // Visual line number (accounting for wraps)
-    int top_line;        // Top visible line
+    int current_line;    
+    int screen_line;     
+    int top_line;        
     char command_buffer[COMMAND_BUFFER_SIZE];
     char search_buffer[SEARCH_BUFFER_SIZE];
     int command_mode;
     int search_mode;
     int last_search_direction;
-    int total_wrapped_lines;  // Total number of screen lines
+    int total_wrapped_lines;  
 } Editor;
-
 struct SyntaxPattern {
     char *pattern;
     int color_pair;
 };
-
 struct SyntaxPattern syntax_patterns[] = {
     {"#include", 1}, {"#define", 1}, {"#ifdef", 1}, {"#ifndef", 1}, {"#endif", 1},
     {"int", 2}, {"char", 2}, {"void", 2}, {"return", 2}, {"for", 2}, {"while", 2},
@@ -57,24 +52,19 @@ struct SyntaxPattern syntax_patterns[] = {
     {"False", 4}, {"None", 4}, {"public", 5}, {"private", 5}, {"protected", 5},
     {"interface", 5}, {"extends", 5}, {"implements", 5}, {"new", 5}, {"super", 5},
     {"function", 6}, {"var", 6}, {"let", 6}, {"async", 6}, {"await", 6},
-    {NULL, 0}  // Sentinel value to mark end of array
+    {NULL, 0}  
 };
-
-// Forward declarations
 void handle_resize(int sig);
 void recalculate_wraps(Editor *ed);
-Editor *GLOBAL_EDITOR = NULL;  // For signal handler
-
+Editor *GLOBAL_EDITOR = NULL;  
 Editor *editor_create() {
     Editor *ed = calloc(1, sizeof(Editor));
     if (!ed) return NULL;
-    
     ed->lines = calloc(MAX_LINES, sizeof(Line));
     if (!ed->lines) {
         free(ed);
         return NULL;
     }
-    
     ed->capacity = MAX_LINES;
     ed->count = 0;
     ed->current_line = 0;
@@ -84,13 +74,10 @@ Editor *editor_create() {
     ed->search_mode = 0;
     ed->last_search_direction = 1;
     ed->total_wrapped_lines = 0;
-    
     return ed;
 }
-
 void editor_destroy(Editor *ed) {
     if (!ed) return;
-    
     for (int i = 0; i < ed->count; i++) {
         free(ed->lines[i].content);
         free(ed->lines[i].wrap_points);
@@ -99,7 +86,6 @@ void editor_destroy(Editor *ed) {
     free(ed->filename);
     free(ed);
 }
-
 int get_display_width(const char *str, int len) {
     int width = 0;
     for (int i = 0; i < len; i++) {
@@ -111,45 +97,35 @@ int get_display_width(const char *str, int len) {
     }
     return width;
 }
-
 void calculate_line_wraps(Line *line, int screen_width) {
     free(line->wrap_points);
     line->wrap_points = NULL;
     line->wrap_count = 0;
     line->wrapped_lines = 1;
-
     if (line->length == 0) return;
-
     int max_wraps = (line->length / (screen_width / 2)) + 1;
     line->wrap_points = malloc(sizeof(int) * max_wraps);
     if (!line->wrap_points) return;
-
     int current_width = 0;
     int last_wrap = 0;
     int last_space = -1;
-
     for (int i = 0; i < line->length; i++) {
         char c = line->content[i];
-        
         if (c == '\t') {
             current_width += TAB_SIZE - (current_width % TAB_SIZE);
         } else if (isprint(c)) {
             current_width++;
         }
-
         if (isspace(c)) {
             last_space = i;
         }
-
         if (current_width >= screen_width) {
             int wrap_at;
-            
             if (last_space > last_wrap && last_space - last_wrap < screen_width) {
                 wrap_at = last_space;
             } else {
                 wrap_at = i;
             }
-
             line->wrap_points[line->wrap_count++] = wrap_at;
             last_wrap = wrap_at;
             current_width = get_display_width(line->content + wrap_at, i - wrap_at + 1);
@@ -158,37 +134,29 @@ void calculate_line_wraps(Line *line, int screen_width) {
         }
     }
 }
-
 void recalculate_wraps(Editor *ed) {
     int screen_width = COLS;
     ed->total_wrapped_lines = 0;
-    
     for (int i = 0; i < ed->count; i++) {
         calculate_line_wraps(&ed->lines[i], screen_width);
         ed->total_wrapped_lines += ed->lines[i].wrapped_lines;
     }
 }
-
 int editor_append_line(Editor *ed, const char *content, int length) {
     if (ed->count >= ed->capacity) return -1;
-    
     ed->lines[ed->count].content = strndup(content, length);
     if (!ed->lines[ed->count].content) return -1;
-    
     ed->lines[ed->count].length = length;
     ed->lines[ed->count].allocated = length + 1;
     ed->lines[ed->count].wrap_points = NULL;
     ed->lines[ed->count].wrap_count = 0;
     ed->lines[ed->count].wrapped_lines = 1;
-    
     ed->count++;
     return 0;
 }
-
 void highlight_syntax(const char *line) {
     int in_string = 0, in_char = 0, in_multiline_comment = 0, in_single_comment = 0;
     char prev_char = '\0';
-
     for (const char *pos = line; *pos != '\0'; pos++) {
         if (!in_string && !in_char) {
             if (pos[0] == '/' && pos[1] == '*' && !in_single_comment) {
@@ -210,7 +178,6 @@ void highlight_syntax(const char *line) {
                 attron(COLOR_PAIR(4));
             }
         }
-
         if (!in_multiline_comment && !in_single_comment) {
             if (*pos == '"' && prev_char != '\\') {
                 in_string = !in_string;
@@ -221,7 +188,6 @@ void highlight_syntax(const char *line) {
                 attron(COLOR_PAIR(5));
             }
         }
-
         if (in_multiline_comment || in_single_comment) {
             attron(COLOR_PAIR(4));
             addch(*pos);
@@ -259,19 +225,15 @@ void highlight_syntax(const char *line) {
                 }
             }
         }
-
         prev_char = *pos;
-        
         if (*pos == '\n') {
             in_single_comment = 0;
             attroff(COLOR_PAIR(4));
         }
     }
 }
-
 void screen_to_file_position(Editor *ed, int screen_line, int *file_line, int *wrap_index) {
     int current_screen_line = 0;
-    
     for (int i = 0; i < ed->count; i++) {
         if (current_screen_line + ed->lines[i].wrapped_lines > screen_line) {
             *file_line = i;
@@ -280,33 +242,25 @@ void screen_to_file_position(Editor *ed, int screen_line, int *file_line, int *w
         }
         current_screen_line += ed->lines[i].wrapped_lines;
     }
-    
     *file_line = ed->count - 1;
     *wrap_index = ed->lines[*file_line].wrapped_lines - 1;
 }
-
 void display_wrapped_line(const Line *line, int start, int end, int y, int x) {
     move(y, x);
-    
     int current_x = x;
     char *temp = malloc(end - start + 1);
     if (!temp) return;
-    
     strncpy(temp, line->content + start, end - start);
     temp[end - start] = '\0';
-    
     highlight_syntax(temp);
     free(temp);
 }
-
 void draw_status_bar(Editor *ed) {
     int x, y;
     getmaxyx(stdscr, y, x);
-    
     attron(COLOR_PAIR(8) | A_BOLD);
     mvhline(y - 2, 0, ' ', x);
     move(y - 2, 0);
-    
     int percent;
     if (ed->count <= 1) {
         percent = 100;
@@ -315,14 +269,12 @@ void draw_status_bar(Editor *ed) {
     } else {
         percent = (int)((float)(ed->current_line + 1) / ed->count * 100);
     }
-    
     char status_message[MAX_LINE_LENGTH];
     snprintf(status_message, sizeof(status_message),
              " %s | Line %d/%d (%d%%) | ':' cmd | '/' search | 'n' next | 'N' prev | 'q' quit",
              ed->filename, ed->current_line + 1, ed->count, percent);
     addstr(status_message);
     attroff(COLOR_PAIR(8) | A_BOLD);
-    
     attron(COLOR_PAIR(9));
     mvhline(y - 1, 0, ' ', x);
     move(y - 1, 0);
@@ -333,39 +285,30 @@ void draw_status_bar(Editor *ed) {
     }
     attroff(COLOR_PAIR(9));
 }
-
 void display_lines(Editor *ed) {
     clear();
     int max_display_lines = LINES - 2;
-    
     int current_screen_line = 0;
     int displayed_lines = 0;
-    
     int file_line, wrap_index;
     screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-    
     for (int i = file_line; i < ed->count && displayed_lines < max_display_lines; i++) {
         Line *line = &ed->lines[i];
-        
         int start = 0;
         for (int w = 0; w < line->wrap_count + 1 && displayed_lines < max_display_lines; w++) {
             int end = (w < line->wrap_count) ? line->wrap_points[w] : line->length;
-            
             if (i == file_line && w < wrap_index) {
                 start = end;
                 continue;
             }
-            
             display_wrapped_line(line, start, end, displayed_lines, 0);
             displayed_lines++;
             start = end;
         }
     }
-    
     draw_status_bar(ed);
     refresh();
 }
-
 void handle_resize(int sig) {
     (void)sig;
     if (GLOBAL_EDITOR) {
@@ -376,17 +319,14 @@ void handle_resize(int sig) {
         display_lines(GLOBAL_EDITOR);
     }
 }
-
 void search_forward(Editor *ed, const char* term) {
     if (!term || strlen(term) == 0) return;
-    
     for (int i = ed->current_line + 1; i < ed->count; i++) {
         if (strstr(ed->lines[i].content, term)) {
             ed->current_line = i;
             return;
         }
     }
-    
     for (int i = 0; i <= ed->current_line; i++) {
         if (strstr(ed->lines[i].content, term)) {
             ed->current_line = i;
@@ -394,17 +334,14 @@ void search_forward(Editor *ed, const char* term) {
         }
     }
 }
-
 void search_backward(Editor *ed, const char* term) {
     if (!term || strlen(term) == 0) return;
-    
     for (int i = ed->current_line - 1; i >= 0; i--) {
         if (strstr(ed->lines[i].content, term)) {
             ed->current_line = i;
             return;
         }
     }
-    
     for (int i = ed->count - 1; i >= ed->current_line; i--) {
         if (strstr(ed->lines[i].content, term)) {
             ed->current_line = i;
@@ -412,7 +349,6 @@ void search_backward(Editor *ed, const char* term) {
         }
     }
 }
-
 void process_command(Editor *ed) {
     if (strcmp(ed->command_buffer, "q") == 0 || strcmp(ed->command_buffer, "quit") == 0) {
         endwin();
@@ -426,12 +362,11 @@ void process_command(Editor *ed) {
     ed->command_mode = 0;
     ed->command_buffer[0] = '\0';
 }
-
 int handle_input(Editor *ed, int ch) {
     if (ed->command_mode) {
         if (ch == '\n') {
             process_command(ed);
-        } else if (ch == 27) { // ESC
+        } else if (ch == 27) { 
             ed->command_mode = 0;
             ed->command_buffer[0] = '\0';
         } else if (ch == KEY_BACKSPACE || ch == 127) {
@@ -448,7 +383,7 @@ int handle_input(Editor *ed, int ch) {
         if (ch == '\n') {
             search_forward(ed, ed->search_buffer);
             ed->search_mode = 0;
-        } else if (ch == 27) { // ESC
+        } else if (ch == 27) { 
             ed->search_mode = 0;
             ed->search_buffer[0] = '\0';
         } else if (ch == KEY_BACKSPACE || ch == 127) {
@@ -496,7 +431,7 @@ int handle_input(Editor *ed, int ch) {
                     ed->current_line = file_line;
                 }
                 break;
-            case ' ': // Page Down
+            case ' ': 
                 {
                     int page_size = LINES - 3;
                     if (ed->screen_line + page_size < ed->total_wrapped_lines) {
@@ -510,7 +445,7 @@ int handle_input(Editor *ed, int ch) {
                     }
                 }
                 break;
-            case 'b': // Page Up
+            case 'b': 
                 {
                     int page_size = LINES - 3;
                     if (ed->screen_line > page_size) {
@@ -529,19 +464,16 @@ int handle_input(Editor *ed, int ch) {
     }
     return 0;
 }
-
 int load_file(Editor *ed, const char *fname) {
     FILE *file = fopen(fname, "r");
     if (!file) {
         return -1;
     }
-
     ed->filename = strdup(fname);
     if (!ed->filename) {
         fclose(file);
         return -1;
     }
-
     char buffer[MAX_LINE_LENGTH];
     while (fgets(buffer, sizeof(buffer), file)) {
         if (editor_append_line(ed, buffer, strlen(buffer)) < 0) {
@@ -549,20 +481,16 @@ int load_file(Editor *ed, const char *fname) {
             return -1;
         }
     }
-
     fclose(file);
     return 0;
 }
-
 int main(int argc, char *argv[]) {
     Editor *ed = editor_create();
     if (!ed) {
         fprintf(stderr, "Failed to initialize editor\n");
         return 1;
     }
-
-    GLOBAL_EDITOR = ed;  // For signal handler
-
+    GLOBAL_EDITOR = ed;  
     int using_pipe = !isatty(STDIN_FILENO);
     if (using_pipe) {
         char buffer[MAX_LINE_LENGTH];
@@ -589,16 +517,13 @@ int main(int argc, char *argv[]) {
         editor_destroy(ed);
         return 1;
     }
-
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
     signal(SIGWINCH, handle_resize);
-    
     initscr();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
-    
     if (has_colors()) {
         start_color();
         use_default_colors();
@@ -612,16 +537,13 @@ int main(int argc, char *argv[]) {
         init_pair(8, COLOR_BLACK, COLOR_WHITE);
         init_pair(9, COLOR_GREEN, COLOR_BLACK);
     }
-
     recalculate_wraps(ed);
     display_lines(ed);
-
     while (1) {
         int ch = getch();
         if (handle_input(ed, ch) < 0) break;
         display_lines(ed);
     }
-
     editor_destroy(ed);
     endwin();
     return 0;
