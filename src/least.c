@@ -1,3 +1,4 @@
+
 #include <ncurses.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -5,8 +6,11 @@
 #include <ctype.h>
 #include <signal.h>
 #include <unistd.h>
+#include <termios.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #define MAX_LINES 20000
-#define MAX_LINE_LENGTH 1024
+#define MAX_LINE_LENGTH 500
 #define COMMAND_BUFFER_SIZE 256
 #define SEARCH_BUFFER_SIZE 256
 char *filename = NULL;
@@ -22,109 +26,54 @@ struct SyntaxPattern {
     int color_pair;
 };
 struct SyntaxPattern syntax_patterns[] = {
-    {"#include", 1},
-    {"#define", 1},
-    {"#ifdef", 1},
-    {"#ifndef", 1},
-    {"#endif", 1},
-    {"int", 2},
-    {"char", 2},
-    {"void", 2},
-    {"return", 2},
-    {"for", 2},
-    {"while", 2},
-    {"if", 2},
-    {"else", 2},
-    {"struct", 2},
-    {"enum", 2},
-    {"typedef", 2},
-    {"static", 2},
-    {"const", 2},
-    {"size_t", 3},
-    {"uint32_t", 3},
-    {"int32_t", 3},
-    {"bool", 3},
-    {"float", 3},
-    {"double", 3},
-    {"def", 4},
-    {"class", 4},
-    {"import", 4},
-    {"from", 4},
-    {"lambda", 4},
-    {"if", 4},
-    {"else", 4},
-    {"elif", 4},
-    {"try", 4},
-    {"except", 4},
-    {"finally", 4},
-    {"for", 4},
-    {"while", 4},
-    {"with", 4},
-    {"return", 4},
-    {"True", 4},
-    {"False", 4},
-    {"None", 4},
-    {"public", 5},
-    {"private", 5},
-    {"protected", 5},
-    {"class", 5},
-    {"interface", 5},
-    {"extends", 5},
-    {"implements", 5},
-    {"new", 5},
-    {"void", 5},
-    {"return", 5},
-    {"if", 5},
-    {"else", 5},
-    {"for", 5},
-    {"while", 5},
-    {"try", 5},
-    {"catch", 5},
-    {"finally", 5},
-    {"super", 5},
-    {"this", 5},
-    {"function", 6},
-    {"var", 6},
-    {"let", 6},
-    {"const", 6},
-    {"if", 6},
-    {"else", 6},
-    {"for", 6},
-    {"while", 6},
-    {"switch", 6},
-    {"case", 6},
-    {"break", 6},
-    {"continue", 6},
-    {"return", 6},
-    {"async", 6},
-    {"await", 6},
-    {"import", 6},
-    {"export", 6},
-    {"if", 7},
-    {"else", 7},
-    {"elif", 7},
-    {"for", 7},
-    {"while", 7},
-    {"do", 7},
-    {"done", 7},
-    {"return", 7},
-    {"function", 7},
-    {"test", 7},
-    {"echo", 7},
-    {"fi", 7},
-    {"NAME", 8},
-    {"SYNOPSIS", 8},
-    {"DESCRIPTION", 8},
-    {"OPTIONS", 8},
-    {"EXIT STATUS", 8},
-    {"RETURN VALUE", 8},
-    {"AUTHOR", 8},
-    {"tldr", 9},
-    {"example", 9},
-    {"usage", 9},
+    {"#include", 1}, {"#define", 1}, {"#ifdef", 1}, {"#ifndef", 1}, {"#endif", 1},
+    {"int", 2}, {"char", 2}, {"void", 2}, {"return", 2}, {"for", 2}, {"while", 2},
+    {"if", 2}, {"else", 2}, {"struct", 2}, {"enum", 2}, {"typedef", 2}, {"static", 2},
+    {"const", 2}, {"size_t", 3}, {"uint32_t", 3}, {"int32_t", 3}, {"bool", 3},
+    {"float", 3}, {"double", 3}, {"def", 4}, {"class", 4}, {"import", 4}, {"from", 4},
+    {"lambda", 4}, {"if", 4}, {"else", 4}, {"elif", 4}, {"try", 4}, {"except", 4},
+    {"finally", 4}, {"for", 4}, {"while", 4}, {"with", 4}, {"return", 4}, {"True", 4},
+    {"False", 4}, {"None", 4}, {"public", 5}, {"private", 5}, {"protected", 5},
+    {"class", 5}, {"interface", 5}, {"extends", 5}, {"implements", 5}, {"new", 5},
+    {"void", 5}, {"return", 5}, {"if", 5}, {"else", 5}, {"for", 5}, {"while", 5},
+    {"try", 5}, {"catch", 5}, {"finally", 5}, {"super", 5}, {"this", 5},
+    {"function", 6}, {"var", 6}, {"let", 6}, {"const", 6}, {"if", 6}, {"else", 6},
+    {"for", 6}, {"while", 6}, {"switch", 6}, {"case", 6}, {"break", 6},
+    {"continue", 6}, {"return", 6}, {"async", 6}, {"await", 6}, {"import", 6},
+    {"export", 6}, {"if", 7}, {"else", 7}, {"elif", 7}, {"for", 7}, {"while", 7},
+    {"do", 7}, {"done", 7}, {"return", 7}, {"function", 7}, {"test", 7}, {"echo", 7},
+    {"fi", 7}, {"NAME", 8}, {"SYNOPSIS", 8}, {"DESCRIPTION", 8}, {"OPTIONS", 8},
+    {"EXIT STATUS", 8}, {"RETURN VALUE", 8}, {"AUTHOR", 8}, {"tldr", 9},
+    {"example", 9}, {"usage", 9},
 };
-void handle_signal(int sig) {
-    (void)sig;
+void handle_signal(int sig) { (void)sig; }
+void setup_terminal() {
+    struct termios term;
+    tcgetattr(STDIN_FILENO, &term);
+    term.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &term);
+}
+void restore_terminal() {
+    struct termios term;
+    tcgetattr(STDIN_FILENO, &term);
+    term.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &term);
+}
+int read_piped_input() {
+    FILE *file = stdin;
+    char buffer[MAX_LINE_LENGTH];
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    while (fgets(buffer, sizeof(buffer), file)) {
+        if (line_count < MAX_LINES) {
+            lines[line_count] = strdup(buffer);
+            line_count++;
+        }
+    }
+    fcntl(STDIN_FILENO, F_SETFL, flags);
+    if (line_count == 0) return -1;
+    filename = strdup("stdin");
+    return 0;
 }
 int load_file(const char *fname) {
     FILE *file = fopen(fname, "r");
@@ -144,16 +93,14 @@ int load_file(const char *fname) {
     return 0;
 }
 void highlight_syntax(char *line) {
-    int in_string = 0;
-    int in_char = 0;
-    int in_multiline_comment = 0;
-    int in_single_comment = 0;
+    int in_string = 0, in_char = 0, in_multiline_comment = 0, in_single_comment = 0;
     char prev_char = '\0';
+
     for (char *pos = line; *pos != '\0'; pos++) {
         if (!in_string && !in_char) {
             if (pos[0] == '/' && pos[1] == '*' && !in_single_comment) {
                 in_multiline_comment = 1;
-                attron(COLOR_PAIR(4));  
+                attron(COLOR_PAIR(4));
                 printw("/*");
                 pos++;
                 continue;
@@ -173,13 +120,14 @@ void highlight_syntax(char *line) {
         if (!in_multiline_comment && !in_single_comment) {
             if (*pos == '"' && prev_char != '\\') {
                 in_string = !in_string;
-                attron(COLOR_PAIR(5));  
+                attron(COLOR_PAIR(5));
             }
             if (*pos == '\'' && prev_char != '\\') {
                 in_char = !in_char;
                 attron(COLOR_PAIR(5));
             }
         }
+
         if (in_multiline_comment || in_single_comment) {
             attron(COLOR_PAIR(4));
             printw("%c", *pos);
@@ -203,24 +151,26 @@ void highlight_syntax(char *line) {
             }
             if (!pattern_matched) {
                 if (isdigit(*pos) || (*pos == '-' && isdigit(*(pos + 1)))) {
-                    attron(COLOR_PAIR(6));  
+                    attron(COLOR_PAIR(6));
                     printw("%c", *pos);
                     attroff(COLOR_PAIR(6));
-                }
-                else if (strchr("+-*/%=<>!&|^~", *pos)) {
-                    attron(COLOR_PAIR(7));  
+                } else if (strchr("+-*/%=<>!&|^~", *pos)) {
+                    attron(COLOR_PAIR(7));
                     printw("%c", *pos);
                     attroff(COLOR_PAIR(7));
-                }
-                else {
+                } else {
                     printw("%c", *pos);
                 }
             }
         }
+
         prev_char = *pos;
+        
+        // Make sure we explicitly handle newlines
         if (*pos == '\n') {
             in_single_comment = 0;
             attroff(COLOR_PAIR(4));
+            printw("\n");  // Explicitly print the newline
         }
     }
 }
@@ -255,12 +205,10 @@ void search_backward(const char* term) {
     }
 }
 void process_command() {
-    if (strcmp(command_buffer, "q") == 0 || 
-        strcmp(command_buffer, "quit") == 0) {
+    if (strcmp(command_buffer, "q") == 0 || strcmp(command_buffer, "quit") == 0) {
         endwin();
         exit(0);
-    }
-    else if (strncmp(command_buffer, "s/", 2) == 0) {
+    } else if (strncmp(command_buffer, "s/", 2) == 0) {
         search_mode = 1;
         strncpy(search_buffer, command_buffer + 2, SEARCH_BUFFER_SIZE - 1);
         search_forward(search_buffer);
@@ -284,94 +232,81 @@ void draw_status_bar() {
     attron(COLOR_PAIR(9));
     mvhline(y - 1, 0, ' ', x);
     move(y - 1, 0);
-    if (command_mode) {
-        printw(":%s", command_buffer);
-    } else if (search_mode) {
-        printw("/%s", search_buffer);
-    }
+    if (command_mode) printw(":%s", command_buffer);
+    else if (search_mode) printw("/%s", search_buffer);
     attroff(COLOR_PAIR(9));
 }
 void display_lines() {
     clear();
-    int max_display_lines = LINES - 2;  
-    int x,y;
-    getmaxyx(stdscr, y, x);  
-    for (int i = 0; i < max_display_lines && current_line + i < line_count; i++) {
-        move(i, 0);
-        char *line = lines[current_line + i];
-        int line_len = strlen(line);
-        int col = 0;
-        for (int j = 0; j < line_len; j++) {
-            if (col >= x - 1) {  
-                move(i++, 0);
-                col = 0;
-            }
-            highlight_syntax(line + j);
-            col++;
-        }
+    int max_display_lines = LINES - 2;  // Leaving space for the status bar
+    int display_start = (current_line < max_display_lines) ? 0 : current_line - max_display_lines + 1;
+    int line_num = display_start;
+
+    for (int i = display_start; i < line_count && i < display_start + max_display_lines; i++) {
+        move(i - display_start, 0); // Move to the correct line position
+        highlight_syntax(lines[i]);
     }
     draw_status_bar();
     refresh();
 }
 int main(int argc, char *argv[]) {
-if (isatty(STDIN_FILENO) == 0) {
-    FILE *file = stdin;
-    char buffer[MAX_LINE_LENGTH];
-    while (fgets(buffer, sizeof(buffer), file)) {
-        if (line_count < MAX_LINES) {
+    int using_pipe = !isatty(STDIN_FILENO);
+    if (using_pipe) {
+        // Read all input before starting ncurses
+        char buffer[MAX_LINE_LENGTH];
+        while (line_count < MAX_LINES && fgets(buffer, sizeof(buffer), stdin) != NULL) {
             lines[line_count] = strdup(buffer);
             line_count++;
         }
-    }
-    filename = strdup("stdin");
+        if (line_count == 0) {
+            fprintf(stderr, "No input received from pipe\n");
+            return 1;
+        }
+        // Reopen stdin as the terminal
+        freopen("/dev/tty", "r", stdin);
+        filename = strdup("stdin");
     } else if (argc < 2) {
         fprintf(stderr, "Usage: %s <file_name>\n", argv[0]);
         return 1;
     } else {
-        if (load_file(argv[1]) == -1) {
-            endwin();
-            return 1;
-        }
+        if (load_file(argv[1]) == -1) return 1;
     }
+
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+   
     initscr();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
+   
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(1, COLOR_GREEN, -1);     
-        init_pair(2, COLOR_BLUE, -1);      
-        init_pair(3, COLOR_CYAN, -1);      
-        init_pair(4, COLOR_RED, -1);       
-        init_pair(5, COLOR_YELLOW, -1);    
-        init_pair(6, COLOR_MAGENTA, -1);   
-        init_pair(7, COLOR_WHITE, -1);     
-        init_pair(8, COLOR_BLACK, COLOR_WHITE);  
-        init_pair(9, COLOR_GREEN, COLOR_BLACK);  
+        init_pair(1, COLOR_GREEN, -1);
+        init_pair(2, COLOR_BLUE, -1);
+        init_pair(3, COLOR_CYAN, -1);
+        init_pair(4, COLOR_RED, -1);
+        init_pair(5, COLOR_YELLOW, -1);
+        init_pair(6, COLOR_MAGENTA, -1);
+        init_pair(7, COLOR_WHITE, -1);
+        init_pair(8, COLOR_BLACK, COLOR_WHITE);
+        init_pair(9, COLOR_GREEN, COLOR_BLACK);
     }
+
     display_lines();
     int ch;
-    nodelay(stdscr, TRUE); 
     while (1) {
         ch = getch();
-        if (ch == ERR) { 
-            napms(100); 
-            continue;
-        }
         if (command_mode) {
             if (ch == '\n') {
                 process_command();
-            } else if (ch == 27) {  
+            } else if (ch == 27) {
                 command_mode = 0;
                 command_buffer[0] = '\0';
             } else if (ch == KEY_BACKSPACE || ch == 127) {
                 int len = strlen(command_buffer);
-                if (len > 0) {
-                    command_buffer[len - 1] = '\0';
-                }
+                if (len > 0) command_buffer[len - 1] = '\0';
             } else if (isprint(ch)) {
                 int len = strlen(command_buffer);
                 if (len < COMMAND_BUFFER_SIZE - 1) {
@@ -379,19 +314,16 @@ if (isatty(STDIN_FILENO) == 0) {
                     command_buffer[len + 1] = '\0';
                 }
             }
-        }
-        else if (search_mode) {
+        } else if (search_mode) {
             if (ch == '\n') {
                 search_forward(search_buffer);
                 search_mode = 0;
-            } else if (ch == 27) {  
+            } else if (ch == 27) {
                 search_mode = 0;
                 search_buffer[0] = '\0';
             } else if (ch == KEY_BACKSPACE || ch == 127) {
                 int len = strlen(search_buffer);
-                if (len > 0) {
-                    search_buffer[len - 1] = '\0';
-                }
+                if (len > 0) search_buffer[len - 1] = '\0';
             } else if (isprint(ch)) {
                 int len = strlen(search_buffer);
                 if (len < SEARCH_BUFFER_SIZE - 1) {
@@ -399,8 +331,7 @@ if (isatty(STDIN_FILENO) == 0) {
                     search_buffer[len + 1] = '\0';
                 }
             }
-        }
-        else {
+        } else {
             switch (ch) {
                 case ':':
                     command_mode = 1;
@@ -410,26 +341,18 @@ if (isatty(STDIN_FILENO) == 0) {
                     search_buffer[0] = '\0';
                     break;
                 case 'n':
-                    if (strlen(search_buffer) > 0) {
-                        search_forward(search_buffer);
-                    }
+                    if (strlen(search_buffer) > 0) search_forward(search_buffer);
                     break;
                 case 'N':
-                    if (strlen(search_buffer) > 0) {
-                        search_backward(search_buffer);
-                    }
+                    if (strlen(search_buffer) > 0) search_backward(search_buffer);
                     break;
                 case KEY_DOWN:
-                    if (current_line + LINES - 2 < line_count) {
-                        current_line++;
-                    }
+                    if (current_line + LINES - 2 < line_count) current_line++;
                     break;
                 case KEY_UP:
-                    if (current_line > 0) {
-                        current_line--;
-                    }
+                    if (current_line > 0) current_line--;
                     break;
-                case ' ':  
+                case ' ':
                     if (current_line + LINES - 2 < line_count) {
                         current_line += LINES - 3;
                         if (current_line + LINES - 2 > line_count) {
@@ -437,12 +360,10 @@ if (isatty(STDIN_FILENO) == 0) {
                         }
                     }
                     break;
-                case 'b':  
+                case 'b':
                     if (current_line > 0) {
                         current_line -= LINES - 3;
-                        if (current_line < 0) {
-                            current_line = 0;
-                        }
+                        if (current_line < 0) current_line = 0;
                     }
                     break;
                 case 'q':
@@ -451,6 +372,7 @@ if (isatty(STDIN_FILENO) == 0) {
         }
         display_lines();
     }
+
 cleanup:
     for (int i = 0; i < line_count; i++) {
         free(lines[i]);
@@ -459,3 +381,5 @@ cleanup:
     endwin();
     return 0;
 }
+
+
