@@ -14,6 +14,7 @@
 #define MAX_LINE_LENGTH 2048
 #define COMMAND_BUFFER_SIZE 256
 #define SEARCH_BUFFER_SIZE 256
+#define MAX_BUFFERS 100
 #define TAB_SIZE 8
 typedef struct {
     char *content;
@@ -21,7 +22,7 @@ typedef struct {
     int allocated;
     int *wrap_points;    
     int wrap_count;      
-    int wrapped_lines;   
+    int wrapped_lines;  
 } Line;
 typedef struct {
     Line *lines;
@@ -29,14 +30,19 @@ typedef struct {
     int capacity;
     char *filename;
     int current_line;    
-    int screen_line;     
+    int screen_line;    
     int top_line;        
+    int total_wrapped_lines;
+} Buffer;
+typedef struct {
+    Buffer *buffers;
+    int current_buffer;
+    int num_buffers;
     char command_buffer[COMMAND_BUFFER_SIZE];
     char search_buffer[SEARCH_BUFFER_SIZE];
     int command_mode;
     int search_mode;
     int last_search_direction;
-    int total_wrapped_lines;  
 } Editor;
 struct SyntaxPattern {
     char *pattern;
@@ -55,35 +61,55 @@ struct SyntaxPattern syntax_patterns[] = {
     {NULL, 0}  
 };
 void handle_resize(int sig);
-void recalculate_wraps(Editor *ed);
-Editor *GLOBAL_EDITOR = NULL;  
+Editor *GLOBAL_EDITOR = NULL;
+void draw_status_bar(Editor *ed);
+Buffer *current_buffer(Editor *ed) {
+    if (ed->current_buffer < 0 || ed->current_buffer >= ed->num_buffers) {
+        return NULL;
+    }
+    return &ed->buffers[ed->current_buffer];
+}
 Editor *editor_create() {
     Editor *ed = calloc(1, sizeof(Editor));
     if (!ed) return NULL;
-    ed->lines = calloc(MAX_LINES, sizeof(Line));
-    if (!ed->lines) {
+    ed->buffers = calloc(MAX_BUFFERS, sizeof(Buffer));
+    if (!ed->buffers) {
         free(ed);
         return NULL;
     }
-    ed->capacity = MAX_LINES;
-    ed->count = 0;
-    ed->current_line = 0;
-    ed->screen_line = 0;
-    ed->top_line = 0;
+    ed->current_buffer = 0;
+    ed->num_buffers = 0;
     ed->command_mode = 0;
     ed->search_mode = 0;
     ed->last_search_direction = 1;
-    ed->total_wrapped_lines = 0;
     return ed;
+}
+Buffer *editor_new_buffer(Editor *ed) {
+    if (ed->num_buffers >= MAX_BUFFERS) return NULL;
+    Buffer *buf = &ed->buffers[ed->num_buffers];
+    buf->lines = calloc(MAX_LINES, sizeof(Line));
+    if (!buf->lines) return NULL;
+    buf->capacity = MAX_LINES;
+    buf->count = 0;
+    buf->current_line = 0;
+    buf->screen_line = 0;
+    buf->top_line = 0;
+    buf->total_wrapped_lines = 0;
+    ed->num_buffers++;
+    return buf;
 }
 void editor_destroy(Editor *ed) {
     if (!ed) return;
-    for (int i = 0; i < ed->count; i++) {
-        free(ed->lines[i].content);
-        free(ed->lines[i].wrap_points);
+    for (int b = 0; b < ed->num_buffers; b++) {
+        Buffer *buf = &ed->buffers[b];
+        for (int i = 0; i < buf->count; i++) {
+            free(buf->lines[i].content);
+            free(buf->lines[i].wrap_points);
+        }
+        free(buf->lines);
+        free(buf->filename);
     }
-    free(ed->lines);
-    free(ed->filename);
+    free(ed->buffers);
     free(ed);
 }
 int get_display_width(const char *str, int len) {
@@ -135,23 +161,25 @@ void calculate_line_wraps(Line *line, int screen_width) {
     }
 }
 void recalculate_wraps(Editor *ed) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return;
     int screen_width = COLS;
-    ed->total_wrapped_lines = 0;
-    for (int i = 0; i < ed->count; i++) {
-        calculate_line_wraps(&ed->lines[i], screen_width);
-        ed->total_wrapped_lines += ed->lines[i].wrapped_lines;
+    buf->total_wrapped_lines = 0;
+    for (int i = 0; i < buf->count; i++) {
+        calculate_line_wraps(&buf->lines[i], screen_width);
+        buf->total_wrapped_lines += buf->lines[i].wrapped_lines;
     }
 }
-int editor_append_line(Editor *ed, const char *content, int length) {
-    if (ed->count >= ed->capacity) return -1;
-    ed->lines[ed->count].content = strndup(content, length);
-    if (!ed->lines[ed->count].content) return -1;
-    ed->lines[ed->count].length = length;
-    ed->lines[ed->count].allocated = length + 1;
-    ed->lines[ed->count].wrap_points = NULL;
-    ed->lines[ed->count].wrap_count = 0;
-    ed->lines[ed->count].wrapped_lines = 1;
-    ed->count++;
+int editor_append_line(Buffer *buf, const char *content, int length) {
+    if (!buf || buf->count >= buf->capacity) return -1;
+    buf->lines[buf->count].content = strndup(content, length);
+    if (!buf->lines[buf->count].content) return -1;
+    buf->lines[buf->count].length = length;
+    buf->lines[buf->count].allocated = length + 1;
+    buf->lines[buf->count].wrap_points = NULL;
+    buf->lines[buf->count].wrap_count = 0;
+    buf->lines[buf->count].wrapped_lines = 1;
+    buf->count++;
     return 0;
 }
 void highlight_syntax(const char *line) {
@@ -233,17 +261,19 @@ void highlight_syntax(const char *line) {
     }
 }
 void screen_to_file_position(Editor *ed, int screen_line, int *file_line, int *wrap_index) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return;
     int current_screen_line = 0;
-    for (int i = 0; i < ed->count; i++) {
-        if (current_screen_line + ed->lines[i].wrapped_lines > screen_line) {
+    for (int i = 0; i < buf->count; i++) {
+        if (current_screen_line + buf->lines[i].wrapped_lines > screen_line) {
             *file_line = i;
             *wrap_index = screen_line - current_screen_line;
             return;
         }
-        current_screen_line += ed->lines[i].wrapped_lines;
+        current_screen_line += buf->lines[i].wrapped_lines;
     }
-    *file_line = ed->count - 1;
-    *wrap_index = ed->lines[*file_line].wrapped_lines - 1;
+    *file_line = buf->count - 1;
+    *wrap_index = buf->lines[*file_line].wrapped_lines - 1;
 }
 void display_wrapped_line(const Line *line, int start, int end, int y, int x) {
     move(y, x);
@@ -255,45 +285,17 @@ void display_wrapped_line(const Line *line, int start, int end, int y, int x) {
     highlight_syntax(temp);
     free(temp);
 }
-void draw_status_bar(Editor *ed) {
-    int x, y;
-    getmaxyx(stdscr, y, x);
-    attron(COLOR_PAIR(8) | A_BOLD);
-    mvhline(y - 2, 0, ' ', x);
-    move(y - 2, 0);
-    int percent;
-    if (ed->count <= 1) {
-        percent = 100;
-    } else if (ed->current_line >= ed->count - 1) {
-        percent = 100;
-    } else {
-        percent = (int)((float)(ed->current_line + 1) / ed->count * 100);
-    }
-    char status_message[MAX_LINE_LENGTH];
-    snprintf(status_message, sizeof(status_message),
-             " %s | Line %d/%d (%d%%) | ':' cmd | '/' search | 'n' next | 'N' prev | 'q' quit",
-             ed->filename, ed->current_line + 1, ed->count, percent);
-    addstr(status_message);
-    attroff(COLOR_PAIR(8) | A_BOLD);
-    attron(COLOR_PAIR(9));
-    mvhline(y - 1, 0, ' ', x);
-    move(y - 1, 0);
-    if (ed->command_mode) {
-        printw(":%s", ed->command_buffer);
-    } else if (ed->search_mode) {
-        printw("/%s", ed->search_buffer);
-    }
-    attroff(COLOR_PAIR(9));
-}
 void display_lines(Editor *ed) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return;
     clear();
     int max_display_lines = LINES - 2;
     int current_screen_line = 0;
     int displayed_lines = 0;
     int file_line, wrap_index;
-    screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-    for (int i = file_line; i < ed->count && displayed_lines < max_display_lines; i++) {
-        Line *line = &ed->lines[i];
+    screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
+    for (int i = file_line; i < buf->count && displayed_lines < max_display_lines; i++) {
+        Line *line = &buf->lines[i];
         int start = 0;
         for (int w = 0; w < line->wrap_count + 1 && displayed_lines < max_display_lines; w++) {
             int end = (w < line->wrap_count) ? line->wrap_points[w] : line->length;
@@ -309,6 +311,128 @@ void display_lines(Editor *ed) {
     draw_status_bar(ed);
     refresh();
 }
+void search_forward(Editor *ed, const char* term) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf || !term || strlen(term) == 0) return;
+    for (int i = buf->current_line + 1; i < buf->count; i++) {
+        if (strstr(buf->lines[i].content, term)) {
+            buf->current_line = i;
+            buf->screen_line = 0;
+            for (int j = 0; j < i; j++) {
+                buf->screen_line += buf->lines[j].wrapped_lines;
+            }
+            return;
+        }
+    }
+    for (int i = 0; i <= buf->current_line; i++) {
+        if (strstr(buf->lines[i].content, term)) {
+            buf->current_line = i;
+            buf->screen_line = 0;
+            for (int j = 0; j < i; j++) {
+                buf->screen_line += buf->lines[j].wrapped_lines;
+            }
+            return;
+        }
+    }
+}
+void search_backward(Editor *ed, const char* term) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf || !term || strlen(term) == 0) return;
+    for (int i = buf->current_line - 1; i >= 0; i--) {
+        if (strstr(buf->lines[i].content, term)) {
+            buf->current_line = i;
+            buf->screen_line = 0;
+            for (int j = 0; j < i; j++) {
+                buf->screen_line += buf->lines[j].wrapped_lines;
+            }
+            return;
+        }
+    }
+    for (int i = buf->count - 1; i >= buf->current_line; i--) {
+        if (strstr(buf->lines[i].content, term)) {
+            buf->current_line = i;
+            buf->screen_line = 0;
+            for (int j = 0; j < i; j++) {
+                buf->screen_line += buf->lines[j].wrapped_lines;
+            }
+            return;
+        }
+    }
+}
+void process_command(Editor *ed) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return;
+
+    // Quit command: close the current buffer or quit if only one buffer is open
+    if (strcmp(ed->command_buffer, "q") == 0) {
+        if (ed->num_buffers > 1) {
+            // Shift buffers to close the current one
+            for (int i = ed->current_buffer; i < ed->num_buffers - 1; i++) {
+                ed->buffers[i] = ed->buffers[i + 1];
+            }
+            ed->num_buffers--;
+            // Ensure the current buffer is still valid
+            if (ed->current_buffer >= ed->num_buffers) {
+                ed->current_buffer = ed->num_buffers - 1;
+            }
+        } else {
+            // If there's only one buffer, exit the program
+            endwin();
+            editor_destroy(ed);
+            exit(0);
+        }
+    }
+    // Next buffer command
+    else if (strcmp(ed->command_buffer, "n") == 0) {
+        if (ed->current_buffer < ed->num_buffers - 1) {
+            ed->current_buffer++;
+        }
+    }
+    // Previous buffer command
+    else if (strcmp(ed->command_buffer, "p") == 0) {
+        if (ed->current_buffer > 0) {
+            ed->current_buffer--;
+        }
+    }
+    // Search command
+    else if (strncmp(ed->command_buffer, "s/", 2) == 0) {
+        ed->search_mode = 1;
+        strncpy(ed->search_buffer, ed->command_buffer + 2, SEARCH_BUFFER_SIZE - 1);
+        search_forward(ed, ed->search_buffer);
+    }
+
+    // Reset command mode and clear the command buffer
+    ed->command_mode = 0;
+    ed->command_buffer[0] = '\0';
+}
+void draw_status_bar(Editor *ed) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return;
+    int x, y;
+    getmaxyx(stdscr, y, x);
+    attron(COLOR_PAIR(8) | A_BOLD);
+    mvhline(y - 2, 0, ' ', x);
+    move(y - 2, 0);
+    int percent = (buf->count <= 1) ? 100 :
+                 (buf->current_line >= buf->count - 1) ? 100 :
+                 (int)((float)(buf->current_line + 1) / buf->count * 100);
+    char status_message[MAX_LINE_LENGTH];
+    snprintf(status_message, sizeof(status_message),
+             " [%d/%d] %s | Line %d/%d (%d%%) | ':n' next | ':p' prev | ':q' close | '/' search",
+             ed->current_buffer + 1, ed->num_buffers, buf->filename,
+             buf->current_line + 1, buf->count, percent);
+    addstr(status_message);
+    attroff(COLOR_PAIR(8) | A_BOLD);
+    attron(COLOR_PAIR(9));
+    mvhline(y - 1, 0, ' ', x);
+    move(y - 1, 0);
+    if (ed->command_mode) {
+        printw(":%s", ed->command_buffer);
+    } else if (ed->search_mode) {
+        printw("/%s", ed->search_buffer);
+    }
+    attroff(COLOR_PAIR(9));
+}
 void handle_resize(int sig) {
     (void)sig;
     if (GLOBAL_EDITOR) {
@@ -319,50 +443,9 @@ void handle_resize(int sig) {
         display_lines(GLOBAL_EDITOR);
     }
 }
-void search_forward(Editor *ed, const char* term) {
-    if (!term || strlen(term) == 0) return;
-    for (int i = ed->current_line + 1; i < ed->count; i++) {
-        if (strstr(ed->lines[i].content, term)) {
-            ed->current_line = i;
-            return;
-        }
-    }
-    for (int i = 0; i <= ed->current_line; i++) {
-        if (strstr(ed->lines[i].content, term)) {
-            ed->current_line = i;
-            return;
-        }
-    }
-}
-void search_backward(Editor *ed, const char* term) {
-    if (!term || strlen(term) == 0) return;
-    for (int i = ed->current_line - 1; i >= 0; i--) {
-        if (strstr(ed->lines[i].content, term)) {
-            ed->current_line = i;
-            return;
-        }
-    }
-    for (int i = ed->count - 1; i >= ed->current_line; i--) {
-        if (strstr(ed->lines[i].content, term)) {
-            ed->current_line = i;
-            return;
-        }
-    }
-}
-void process_command(Editor *ed) {
-    if (strcmp(ed->command_buffer, "q") == 0 || strcmp(ed->command_buffer, "quit") == 0) {
-        endwin();
-        editor_destroy(ed);
-        exit(0);
-    } else if (strncmp(ed->command_buffer, "s/", 2) == 0) {
-        ed->search_mode = 1;
-        strncpy(ed->search_buffer, ed->command_buffer + 2, SEARCH_BUFFER_SIZE - 1);
-        search_forward(ed, ed->search_buffer);
-    }
-    ed->command_mode = 0;
-    ed->command_buffer[0] = '\0';
-}
 int handle_input(Editor *ed, int ch) {
+    Buffer *buf = current_buffer(ed);
+    if (!buf) return -1;
     if (ed->command_mode) {
         if (ch == '\n') {
             process_command(ed);
@@ -400,6 +483,7 @@ int handle_input(Editor *ed, int ch) {
         switch (ch) {
             case ':':
                 ed->command_mode = 1;
+                ed->command_buffer[0] = '\0';
                 break;
             case '/':
                 ed->search_mode = 1;
@@ -416,46 +500,39 @@ int handle_input(Editor *ed, int ch) {
                 }
                 break;
             case KEY_DOWN:
-                if (ed->screen_line < ed->total_wrapped_lines - 1) {
-                    ed->screen_line++;
+                    buf->screen_line++;
                     int file_line, wrap_index;
-                    screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-                    ed->current_line = file_line;
-                }
+                    screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
+                    buf->current_line = file_line;
                 break;
             case KEY_UP:
-                if (ed->screen_line > 0) {
-                    ed->screen_line--;
+                if (buf->screen_line > 0) {
+                    buf->screen_line--;
                     int file_line, wrap_index;
-                    screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-                    ed->current_line = file_line;
+                    screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
+                    buf->current_line = file_line;
                 }
                 break;
             case ' ': 
                 {
                     int page_size = LINES - 3;
-                    if (ed->screen_line + page_size < ed->total_wrapped_lines) {
-                        ed->screen_line += page_size;
-                        int file_line, wrap_index;
-                        screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-                        ed->current_line = file_line;
-                    } else {
-                        ed->screen_line = ed->total_wrapped_lines - 1;
-                        ed->current_line = ed->count - 1;
-                    }
+                        buf->screen_line += page_size;
+                    int file_line, wrap_index;
+                    screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
+                    buf->current_line = file_line;
                 }
                 break;
             case 'b': 
                 {
                     int page_size = LINES - 3;
-                    if (ed->screen_line > page_size) {
-                        ed->screen_line -= page_size;
+                    if (buf->screen_line > page_size) {
+                        buf->screen_line -= page_size;
                     } else {
-                        ed->screen_line = 0;
+                        buf->screen_line = 0;
                     }
                     int file_line, wrap_index;
-                    screen_to_file_position(ed, ed->screen_line, &file_line, &wrap_index);
-                    ed->current_line = file_line;
+                    screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
+                    buf->current_line = file_line;
                 }
                 break;
             case 'q':
@@ -465,18 +542,22 @@ int handle_input(Editor *ed, int ch) {
     return 0;
 }
 int load_file(Editor *ed, const char *fname) {
+    Buffer *buf = editor_new_buffer(ed);
+    if (!buf) return -1;
     FILE *file = fopen(fname, "r");
     if (!file) {
+        ed->num_buffers--; 
         return -1;
     }
-    ed->filename = strdup(fname);
-    if (!ed->filename) {
+    buf->filename = strdup(fname);
+    if (!buf->filename) {
         fclose(file);
+        ed->num_buffers--;
         return -1;
     }
     char buffer[MAX_LINE_LENGTH];
     while (fgets(buffer, sizeof(buffer), file)) {
-        if (editor_append_line(ed, buffer, strlen(buffer)) < 0) {
+        if (editor_append_line(buf, buffer, strlen(buffer)) < 0) {
             fclose(file);
             return -1;
         }
@@ -490,30 +571,119 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to initialize editor\n");
         return 1;
     }
-    GLOBAL_EDITOR = ed;  
-    int using_pipe = !isatty(STDIN_FILENO);
-    if (using_pipe) {
-        char buffer[MAX_LINE_LENGTH];
-        while (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-            if (editor_append_line(ed, buffer, strlen(buffer)) < 0) {
-                fprintf(stderr, "Failed to process input\n");
+    GLOBAL_EDITOR = ed;
+    int need_reopen_tty = 0;
+    if (!isatty(STDIN_FILENO)) {
+        need_reopen_tty = 1;
+        Buffer *pipe_buf = NULL;
+        char pipe_name[32];
+        int pipe_count = 0;
+        int ch;
+        char line[MAX_LINE_LENGTH];
+        size_t line_pos = 0;
+        int found_null = 0;
+        while ((ch = fgetc(stdin)) != EOF) {
+            if (ch == '\0') {
+                if (line_pos > 0) {
+                    line[line_pos] = '\0';
+                    if (pipe_buf && editor_append_line(pipe_buf, line, line_pos) < 0) {
+                        fprintf(stderr, "Failed to process pipe input\n");
+                        editor_destroy(ed);
+                        return 1;
+                    }
+                    line_pos = 0;
+                }
+                pipe_buf = editor_new_buffer(ed);
+                if (!pipe_buf) {
+                    fprintf(stderr, "Failed to create buffer for pipe input\n");
+                    editor_destroy(ed);
+                    return 1;
+                }
+                snprintf(pipe_name, sizeof(pipe_name), "pipe-%d", ++pipe_count);
+                pipe_buf->filename = strdup(pipe_name);
+                found_null = 1;
+                continue;
+            }
+            if (line_pos >= MAX_LINE_LENGTH - 1) {
+                line[line_pos] = '\0';
+                if (!pipe_buf) {
+                    pipe_buf = editor_new_buffer(ed);
+                    if (!pipe_buf) {
+                        fprintf(stderr, "Failed to create buffer for pipe input\n");
+                        editor_destroy(ed);
+                        return 1;
+                    }
+                    snprintf(pipe_name, sizeof(pipe_name), "pipe-%d", ++pipe_count);
+                    pipe_buf->filename = strdup(pipe_name);
+                }
+                if (editor_append_line(pipe_buf, line, line_pos) < 0) {
+                    fprintf(stderr, "Failed to process pipe input\n");
+                    editor_destroy(ed);
+                    return 1;
+                }
+                line_pos = 0;
+            }
+            if (ch == '\n') {
+                if (!pipe_buf) {
+                    pipe_buf = editor_new_buffer(ed);
+                    if (!pipe_buf) {
+                        fprintf(stderr, "Failed to create buffer for pipe input\n");
+                        editor_destroy(ed);
+                        return 1;
+                    }
+                    snprintf(pipe_name, sizeof(pipe_name), "pipe-%d", ++pipe_count);
+                    pipe_buf->filename = strdup(pipe_name);
+                }
+                line[line_pos] = '\0';
+                if (editor_append_line(pipe_buf, line, line_pos) < 0) {
+                    fprintf(stderr, "Failed to process pipe input\n");
+                    editor_destroy(ed);
+                    return 1;
+                }
+                line_pos = 0;
+            } else {
+                line[line_pos++] = ch;
+            }
+        }
+        if (line_pos > 0) {
+            line[line_pos] = '\0';
+            if (!pipe_buf) {
+                pipe_buf = editor_new_buffer(ed);
+                if (!pipe_buf) {
+                    fprintf(stderr, "Failed to create buffer for pipe input\n");
+                    editor_destroy(ed);
+                    return 1;
+                }
+                snprintf(pipe_name, sizeof(pipe_name), "pipe-%d", ++pipe_count);
+                pipe_buf->filename = strdup(pipe_name);
+            }
+            if (editor_append_line(pipe_buf, line, line_pos) < 0) {
+                fprintf(stderr, "Failed to process pipe input\n");
                 editor_destroy(ed);
                 return 1;
             }
         }
-        if (ed->count == 0) {
+        if (ed->num_buffers == 0) {
             fprintf(stderr, "No input received from pipe\n");
             editor_destroy(ed);
             return 1;
         }
-        freopen("/dev/tty", "r", stdin);
-        ed->filename = strdup("stdin");
-    } else if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file_name>\n", argv[0]);
-        editor_destroy(ed);
-        return 1;
-    } else if (load_file(ed, argv[1]) < 0) {
-        fprintf(stderr, "Failed to load file: %s\n", strerror(errno));
+    }
+    for (int i = 1; i < argc; i++) {
+        if (load_file(ed, argv[i]) < 0) {
+            fprintf(stderr, "Failed to load file %s: %s\n", argv[i], strerror(errno));
+            continue;
+        }
+    }
+    if (need_reopen_tty) {
+        if (freopen("/dev/tty", "r", stdin) == NULL) {
+            fprintf(stderr, "Failed to reopen tty\n");
+            editor_destroy(ed);
+            return 1;
+        }
+    }
+    if (ed->num_buffers == 0) {
+        fprintf(stderr, "Usage: %s [file_name ...] < [pipe_input]\n", argv[0]);
         editor_destroy(ed);
         return 1;
     }
@@ -538,11 +708,12 @@ int main(int argc, char *argv[]) {
         init_pair(9, COLOR_GREEN, COLOR_BLACK);
     }
     recalculate_wraps(ed);
-    display_lines(ed);
     while (1) {
+        Buffer *buf = current_buffer(ed);
+        if (!buf) break;
+        display_lines(ed);
         int ch = getch();
         if (handle_input(ed, ch) < 0) break;
-        display_lines(ed);
     }
     editor_destroy(ed);
     endwin();
