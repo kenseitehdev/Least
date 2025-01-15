@@ -1,3 +1,4 @@
+
 #include <ncurses.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <wchar.h>
+#include <regex.h>
 #define MAX_LINES 100000
 #define MAX_LINE_LENGTH 2048
 #define COMMAND_BUFFER_SIZE 256
@@ -33,6 +35,7 @@ typedef struct {
     int screen_line;    
     int top_line;        
     int total_wrapped_lines;
+    int show_line_numbers;
 } Buffer;
 typedef struct {
     Buffer *buffers;
@@ -276,132 +279,206 @@ void screen_to_file_position(Editor *ed, int screen_line, int *file_line, int *w
     *wrap_index = buf->lines[*file_line].wrapped_lines - 1;
 }
 void display_wrapped_line(const Line *line, int start, int end, int y, int x) {
-    move(y, x);
+    move(y, x);  
     int current_x = x;
-    char *temp = malloc(end - start + 1);
+    char *temp = malloc(end - start + 1);  
     if (!temp) return;
-    strncpy(temp, line->content + start, end - start);
-    temp[end - start] = '\0';
-    highlight_syntax(temp);
-    free(temp);
+    strncpy(temp, line->content + start, end - start);  
+    temp[end - start] = '\0';  
+    highlight_syntax(temp);  
+    free(temp);  
 }
 void display_lines(Editor *ed) {
     Buffer *buf = current_buffer(ed);
     if (!buf) return;
-    clear();
-    int max_display_lines = LINES - 2;
-    int current_screen_line = 0;
-    int displayed_lines = 0;
+    clear();  
+    int max_display_lines = LINES - 2;  
+    int displayed_lines = 0;  
     int file_line, wrap_index;
     screen_to_file_position(ed, buf->screen_line, &file_line, &wrap_index);
     for (int i = file_line; i < buf->count && displayed_lines < max_display_lines; i++) {
         Line *line = &buf->lines[i];
         int start = 0;
+        if (buf->show_line_numbers) {
+            move(displayed_lines, 0);  
+            printw("%4d ", i + 1);  
+        }
         for (int w = 0; w < line->wrap_count + 1 && displayed_lines < max_display_lines; w++) {
             int end = (w < line->wrap_count) ? line->wrap_points[w] : line->length;
             if (i == file_line && w < wrap_index) {
                 start = end;
                 continue;
             }
-            display_wrapped_line(line, start, end, displayed_lines, 0);
-            displayed_lines++;
+            display_wrapped_line(line, start, end, displayed_lines, (buf->show_line_numbers ? 6 : 0));
             start = end;
+            displayed_lines++;  
         }
     }
-    draw_status_bar(ed);
-    refresh();
+    draw_status_bar(ed);  
+    refresh();  
 }
-void search_forward(Editor *ed, const char* term) {
+bool search_forward(Editor *ed, const char* term) {
     Buffer *buf = current_buffer(ed);
-    if (!buf || !term || strlen(term) == 0) return;
+    if (!buf || !term || strlen(term) == 0) return false;
+
+    regex_t regex;
+    int ret = regcomp(&regex, term, REG_EXTENDED | REG_NEWLINE);
+    if (ret) {
+        mvprintw(LINES - 1, 0, "Invalid regex pattern");
+        clrtoeol();
+        refresh();
+        napms(1000);
+        return false;
+    }
+
     for (int i = buf->current_line + 1; i < buf->count; i++) {
-        if (strstr(buf->lines[i].content, term)) {
+        if (regexec(&regex, buf->lines[i].content, 0, NULL, 0) == 0) {
             buf->current_line = i;
             buf->screen_line = 0;
             for (int j = 0; j < i; j++) {
                 buf->screen_line += buf->lines[j].wrapped_lines;
             }
-            return;
+            regfree(&regex);
+            return true;
         }
     }
+
     for (int i = 0; i <= buf->current_line; i++) {
-        if (strstr(buf->lines[i].content, term)) {
+        if (regexec(&regex, buf->lines[i].content, 0, NULL, 0) == 0) {
             buf->current_line = i;
             buf->screen_line = 0;
             for (int j = 0; j < i; j++) {
                 buf->screen_line += buf->lines[j].wrapped_lines;
             }
-            return;
+            regfree(&regex);
+            return true;
         }
     }
+
+    regfree(&regex);
+    return false;
 }
 void search_backward(Editor *ed, const char* term) {
     Buffer *buf = current_buffer(ed);
     if (!buf || !term || strlen(term) == 0) return;
+
+    regex_t regex;
+    int ret = regcomp(&regex, term, REG_EXTENDED | REG_NEWLINE);
+    if (ret) {
+        mvprintw(LINES - 1, 0, "Invalid regex pattern");
+        clrtoeol();
+        refresh();
+        napms(1000);
+        return;
+    }
+
     for (int i = buf->current_line - 1; i >= 0; i--) {
-        if (strstr(buf->lines[i].content, term)) {
+        if (regexec(&regex, buf->lines[i].content, 0, NULL, 0) == 0) {
             buf->current_line = i;
             buf->screen_line = 0;
             for (int j = 0; j < i; j++) {
                 buf->screen_line += buf->lines[j].wrapped_lines;
             }
+            regfree(&regex);
             return;
         }
     }
+
     for (int i = buf->count - 1; i >= buf->current_line; i--) {
-        if (strstr(buf->lines[i].content, term)) {
+        if (regexec(&regex, buf->lines[i].content, 0, NULL, 0) == 0) {
             buf->current_line = i;
             buf->screen_line = 0;
             for (int j = 0; j < i; j++) {
                 buf->screen_line += buf->lines[j].wrapped_lines;
             }
+            regfree(&regex);
             return;
         }
     }
+
+    regfree(&regex);
 }
 void process_command(Editor *ed) {
     Buffer *buf = current_buffer(ed);
     if (!buf) return;
-
-    // Quit command: close the current buffer or quit if only one buffer is open
     if (strcmp(ed->command_buffer, "q") == 0) {
         if (ed->num_buffers > 1) {
-            // Shift buffers to close the current one
             for (int i = ed->current_buffer; i < ed->num_buffers - 1; i++) {
                 ed->buffers[i] = ed->buffers[i + 1];
             }
             ed->num_buffers--;
-            // Ensure the current buffer is still valid
             if (ed->current_buffer >= ed->num_buffers) {
                 ed->current_buffer = ed->num_buffers - 1;
             }
         } else {
-            // If there's only one buffer, exit the program
             endwin();
             editor_destroy(ed);
             exit(0);
         }
     }
-    // Next buffer command
     else if (strcmp(ed->command_buffer, "n") == 0) {
         if (ed->current_buffer < ed->num_buffers - 1) {
             ed->current_buffer++;
+            clear();
+            refresh();
         }
     }
-    // Previous buffer command
     else if (strcmp(ed->command_buffer, "p") == 0) {
         if (ed->current_buffer > 0) {
             ed->current_buffer--;
+            clear();
+            refresh();
         }
     }
-    // Search command
+else if (strcmp(ed->command_buffer, "l") == 0) {
+    buf->show_line_numbers = !buf->show_line_numbers;
+    clear();  
+    display_lines(ed);  
+}
+    else if (strncmp(ed->command_buffer, "j", 1) == 0) {
+        int line_number = 0;
+        if (sscanf(ed->command_buffer + 1, "%d", &line_number) == 1) {
+            if (line_number > 0 && line_number <= buf->count) {
+                buf->current_line = line_number - 1;  
+                buf->screen_line = 0;
+                for (int j = 0; j < buf->current_line; j++) {
+                    buf->screen_line += buf->lines[j].wrapped_lines;
+                }
+                clear();
+                refresh();
+            } else {
+                mvprintw(LINES-1, 0, "Invalid line number");
+                clrtoeol();
+                refresh();
+                napms(1000);
+            }
+        } else {
+            mvprintw(LINES-1, 0, "Invalid command: j requires a line number");
+            clrtoeol();
+            refresh();
+            napms(1000);
+        }
+    }
     else if (strncmp(ed->command_buffer, "s/", 2) == 0) {
         ed->search_mode = 1;
         strncpy(ed->search_buffer, ed->command_buffer + 2, SEARCH_BUFFER_SIZE - 1);
-        search_forward(ed, ed->search_buffer);
+        ed->search_buffer[SEARCH_BUFFER_SIZE - 1] = '\0';
+        if (!search_forward(ed, ed->search_buffer)) {
+            mvprintw(LINES-1, 0, "Pattern not found");
+            clrtoeol();
+            refresh();
+            napms(1000);
+        } else {
+            clear();
+            refresh();
+        }
     }
-
-    // Reset command mode and clear the command buffer
+    else {
+        mvprintw(LINES-1, 0, "Invalid command");
+        clrtoeol();
+        refresh();
+        napms(1000);
+    }
     ed->command_mode = 0;
     ed->command_buffer[0] = '\0';
 }
@@ -449,7 +526,7 @@ int handle_input(Editor *ed, int ch) {
     if (ed->command_mode) {
         if (ch == '\n') {
             process_command(ed);
-        } else if (ch == 27) { 
+        } else if (ch == 27) {
             ed->command_mode = 0;
             ed->command_buffer[0] = '\0';
         } else if (ch == KEY_BACKSPACE || ch == 127) {
@@ -466,7 +543,7 @@ int handle_input(Editor *ed, int ch) {
         if (ch == '\n') {
             search_forward(ed, ed->search_buffer);
             ed->search_mode = 0;
-        } else if (ch == 27) { 
+        } else if (ch == 27) {
             ed->search_mode = 0;
             ed->search_buffer[0] = '\0';
         } else if (ch == KEY_BACKSPACE || ch == 127) {
@@ -494,7 +571,7 @@ int handle_input(Editor *ed, int ch) {
                     search_forward(ed, ed->search_buffer);
                 }
                 break;
-            case 'N':
+            case 'p':
                 if (strlen(ed->search_buffer) > 0) {
                     search_backward(ed, ed->search_buffer);
                 }
@@ -513,7 +590,7 @@ int handle_input(Editor *ed, int ch) {
                     buf->current_line = file_line;
                 }
                 break;
-            case ' ': 
+            case ' ':
                 {
                     int page_size = LINES - 3;
                         buf->screen_line += page_size;
@@ -522,7 +599,7 @@ int handle_input(Editor *ed, int ch) {
                     buf->current_line = file_line;
                 }
                 break;
-            case 'b': 
+            case 'b':
                 {
                     int page_size = LINES - 3;
                     if (buf->screen_line > page_size) {
@@ -537,6 +614,14 @@ int handle_input(Editor *ed, int ch) {
                 break;
             case 'q':
                 return -1;
+            case KEY_RIGHT:  
+                strcpy(ed->command_buffer, "n");
+                process_command(ed);
+                break;
+            case KEY_LEFT:  
+                strcpy(ed->command_buffer, "p");
+                process_command(ed);
+                break;
         }
     }
     return 0;
@@ -546,7 +631,7 @@ int load_file(Editor *ed, const char *fname) {
     if (!buf) return -1;
     FILE *file = fopen(fname, "r");
     if (!file) {
-        ed->num_buffers--; 
+        ed->num_buffers--;
         return -1;
     }
     buf->filename = strdup(fname);
@@ -565,7 +650,42 @@ int load_file(Editor *ed, const char *fname) {
     fclose(file);
     return 0;
 }
+void print_help(const char *prog_name) {
+    printf("Usage: %s [OPTIONS] [PIPE_INPUT] | [FILE...]\n", prog_name);
+    printf("\nA terminal-based text editor that accepts piped input and files for editing.\n");
+    printf("\nOptions:\n");
+    printf("  -h, --help            Show this help message and exit.\n");
+    printf("  -v, --version         Display the version information and exit.\n");
+    printf("\nArguments:\n");
+    printf("  PIPE_INPUT            Input provided through a pipe (supports multiple piped inputs).\n");
+    printf("  FILE...               One or more files to open and edit (provided after the program name).\n");
+    printf("\nExamples:\n");
+    printf("  cat input.txt | %s         Pipe the content of 'input.txt' into the editor.\n", prog_name);
+    printf("  %s file1.txt file2.txt\n", prog_name);
+    printf("                         Edit multiple files: 'file1.txt' and 'file2.txt'.\n");
+    printf("  command1 | command2 | %s\n", prog_name);
+    printf("                         Pipe the output from multiple commands into the editor.\n");
+    printf("  %s file1.txt file2.txt | command1 | command2\n", prog_name);
+    printf("                         A mix of files and piped input from multiple commands.\n");
+    printf("\nNotes:\n");
+    printf("  - Piped input must appear before the program name (e.g., 'command1 | command2 | %s').\n", prog_name);
+    printf("  - Files must be listed after the program name (e.g., '%s file1.txt file2.txt').\n", prog_name);
+    printf("  - If no input is provided (no files or pipes), this help message will be shown.\n");
+}
+void print_version() {
+    printf("Least version 0.7\n");
+}
 int main(int argc, char *argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_help(argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+            print_version();
+            return 0;
+        }
+    }
     Editor *ed = editor_create();
     if (!ed) {
         fprintf(stderr, "Failed to initialize editor\n");
