@@ -590,7 +590,7 @@ void print_help(const char * prog_name) {
   printf(" - If no input is provided (no files or pipes), this help message will be shown.\n");
 }
 void print_version() {
-  printf("Least version 0.7\n");
+  printf("Least version 0.8\n");
 }
 char * get_running_command() {
   FILE * fp = fopen("/proc/self/cmdline", "r");
